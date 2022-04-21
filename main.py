@@ -33,9 +33,11 @@ if __name__ == "__main__":
     parser.add_argument("--reference_latency", default=None, type=float, help='the reference latency in specified hardware')
     # configurations of imagenet dataset
     parser.add_argument("--data_path", default='/data/imagenet/', type=str)
+    parser.add_argument("--dataset_type", default='imagenet', type=str, choices=['imagenet', 'cifar10', 'cifar100'])
     parser.add_argument("--train_batch_size", default=256, type=int)
     parser.add_argument("--test_batch_size", default=500, type=int)
-    parser.add_argument("--n_worker", default=32, type=int)
+    parser.add_argument("--n_worker", default=16, type=int)
+    parser.add_argument("--width_mult", default=1.0, type=float)
     parser.add_argument("--resize_scale", default=0.08, type=float)
     parser.add_argument("--distort_color", default='normal', type=str, choices=['normal', 'strong', 'None'])
     # configurations for training mode
@@ -48,27 +50,68 @@ if __name__ == "__main__":
     parser.add_argument("--exported_arch_path", default=None, type=str)
 
     args = parser.parse_args()
-    if args.train_mode == 'retrain' and args.exported_arch_path is None:
-        logger.error('When --train_mode is retrain, --exported_arch_path must be specified.')
-        sys.exit(-1)
+        
+    num_classes = 1000
+    if args.dataset_type == 'cifar10':
+        num_classes = 10
+    elif args.dataset_type == 'cifar100':
+        num_classes = 100
 
     if args.train_mode == 'retrain':
+        if args.exported_arch_path is None:
+            logger.error('When --train_mode is retrain, --exported_arch_path must be specified.')
+            logger.warning('Randomizing binarized path and running ...')
+            
+            from nni.retiarii.oneshot.pytorch.utils import replace_layer_choice, replace_input_choice
+            from nni.retiarii.oneshot.pytorch.proxyless import ProxylessLayerChoice, ProxylessInputChoice
+            
+            model = SearchMobileNet(width_stages=[int(i) for i in args.width_stages.split(',')],
+                                n_cell_stages=[int(i) for i in args.n_cell_stages.split(',')],
+                                stride_stages=[int(i) for i in args.stride_stages.split(',')],
+                                n_classes=num_classes,
+                                dropout_rate=args.dropout_rate,
+                                bn_param=(args.bn_momentum, args.bn_eps),
+                                width_mult=args.width_mult)
+            
+            # Add modules to nas_modules
+            nas_modules = []
+            replace_layer_choice(model, ProxylessLayerChoice, nas_modules)
+            replace_input_choice(model, ProxylessInputChoice, nas_modules)
+            
+            # Resample module
+            for _, module in nas_modules:
+                module.resample()
+                
+            # Export randomly sampled module parameters
+            result = dict()
+            for name, module in nas_modules:
+                if name not in result:
+                    result[name] = module.export()
+            logger.warning("Using random sample: " + str(result))
+            
+            random_arch_filename = '/tmp/random.json'
+            with open(random_arch_filename, 'w') as f:
+                json.dump(result, f)
+            args.exported_arch_path = random_arch_filename
+        
         assert os.path.isfile(args.exported_arch_path), \
             "exported_arch_path {} should be a file.".format(args.exported_arch_path)
         with fixed_arch(args.exported_arch_path):
             model = SearchMobileNet(width_stages=[int(i) for i in args.width_stages.split(',')],
                                     n_cell_stages=[int(i) for i in args.n_cell_stages.split(',')],
                                     stride_stages=[int(i) for i in args.stride_stages.split(',')],
-                                    n_classes=1000,
+                                    n_classes=num_classes,
                                     dropout_rate=args.dropout_rate,
-                                    bn_param=(args.bn_momentum, args.bn_eps))
+                                    bn_param=(args.bn_momentum, args.bn_eps),
+                                    width_mult=args.width_mult)
     else:
         model = SearchMobileNet(width_stages=[int(i) for i in args.width_stages.split(',')],
                                 n_cell_stages=[int(i) for i in args.n_cell_stages.split(',')],
                                 stride_stages=[int(i) for i in args.stride_stages.split(',')],
-                                n_classes=1000,
+                                n_classes=num_classes,
                                 dropout_rate=args.dropout_rate,
-                                bn_param=(args.bn_momentum, args.bn_eps))
+                                bn_param=(args.bn_momentum, args.bn_eps),
+                                width_mult=args.width_mult)
     logger.info('SearchMobileNet model create done')
     model.init_model()
     logger.info('SearchMobileNet model init done')
@@ -80,7 +123,8 @@ if __name__ == "__main__":
         device = torch.device('cpu')
 
     logger.info('Creating data provider...')
-    data_provider = datasets.ImagenetDataProvider(save_path=args.data_path,
+    data_provider = datasets.ImageDatasetProvider(dataset_type=args.dataset_type,
+                                                  save_path=args.data_path,
                                                   train_batch_size=args.train_batch_size,
                                                   test_batch_size=args.test_batch_size,
                                                   valid_size=None,
@@ -88,6 +132,9 @@ if __name__ == "__main__":
                                                   resize_scale=args.resize_scale,
                                                   distort_color=args.distort_color)
     logger.info('Creating data provider done')
+    
+    if args.applied_hardware == None or args.reference_latency == None:
+        logger.warn("Applied hardware or reference latency not set. Disabling whole architecture update process")
 
     if args.no_decay_keys:
         keys = args.no_decay_keys
@@ -112,15 +159,36 @@ if __name__ == "__main__":
 
     if args.train_mode == 'search':
         from nni.retiarii.oneshot.pytorch import ProxylessTrainer
-        from torchvision.datasets import ImageNet
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-        dataset = ImageNet(args.data_path, transform=transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+        if args.dataset_type == 'imagenet':
+            from torchvision.datasets import ImageNet
+            normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                            std=[0.229, 0.224, 0.225])
+            dataset = ImageNet(args.data_path, transform=transforms.Compose([
+                transforms.RandomResizedCrop(224),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ]))
+            dummy_input_size = (1, 3, 224, 224)
+        elif args.dataset_type == 'cifar10':
+            from torchvision.datasets import CIFAR10
+            
+            dataset = CIFAR10(args.data_path, train=True, transform=transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+            ]), download=True)
+            dummy_input_size = (1, 3, 32, 32)
+        elif args.dataset_type == 'cifar100':
+            from torchvision.datasets import CIFAR100
+            
+            dataset = CIFAR100(args.data_path, train=True, transform=transforms.Compose([
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+            ]), download=True)
+            dummy_input_size = (1, 3, 32, 32)
+        else:
+            raise ValueError(f"Dataset '{args.dataset_type}' not supported!")
+        
         trainer = ProxylessTrainer(model,
                                    loss=LabelSmoothingLoss(),
                                    dataset=dataset,
@@ -130,12 +198,20 @@ if __name__ == "__main__":
                                    log_frequency=10,
                                    grad_reg_loss_type=args.grad_reg_loss_type, 
                                    grad_reg_loss_params=grad_reg_loss_params, 
-                                   applied_hardware=args.applied_hardware, dummy_input=(1, 3, 224, 224),
+                                   applied_hardware=args.applied_hardware, dummy_input=dummy_input_size,
                                    ref_latency=args.reference_latency)
         trainer.fit()
         print('Final architecture:', trainer.export())
         json.dump(trainer.export(), open('checkpoint.json', 'w'))
     elif args.train_mode == 'retrain':
-        # this is retrain
-        trainer = Retrain(model, optimizer, device, data_provider, n_epochs=300)
+        n_epochs = 300
+        
+        trainer = Retrain(model, optimizer, device, data_provider, n_epochs=n_epochs)
         trainer.run()
+
+        final_epoch_weight_path = 'final.pth'
+        torch.save({
+            'epochs': n_epochs,
+            'state_dict': model.state_dict()
+        })
+        print(f"Train finished, saved trained model to {final_epoch_weight_path}")

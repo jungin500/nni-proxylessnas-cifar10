@@ -66,63 +66,114 @@ class DataProvider:
         return train_indexes, valid_indexes
 
 
-class ImagenetDataProvider(DataProvider):
+class ImageDatasetProvider(DataProvider):
 
-    def __init__(self, save_path=None, train_batch_size=256, test_batch_size=512, valid_size=None,
-                 n_worker=32, resize_scale=0.08, distort_color=None):
+    def __init__(self, dataset_type='imagenet', save_path=None, train_batch_size=256, test_batch_size=512, valid_size=None,
+                 n_worker=16, resize_scale=0.08, distort_color=None):
 
         self._save_path = save_path
-        train_transforms = self.build_train_transform(distort_color, resize_scale)
-        train_dataset = datasets.ImageFolder(self.train_path, train_transforms)
+        self._dataset_type = dataset_type
+        if dataset_type == 'imagenet':
+            train_transforms = self.build_train_transform(distort_color, resize_scale)
+            train_dataset = datasets.ImageFolder(self.train_path, train_transforms)
+        elif dataset_type == 'cifar10':
+            train_transforms = self.build_train_transform(distort_color, resize_scale, cifar10_mode=True)
+            train_dataset = datasets.CIFAR10(root=self.train_path, train=True, transform=train_transforms, download=True)
+        elif dataset_type == 'cifar100':
+            train_transforms = self.build_train_transform(distort_color, resize_scale, cifar10_mode=True)
+            train_dataset = datasets.CIFAR100(root=self.train_path, train=True, transform=train_transforms, download=True)
+        else:
+            raise ValueError(f"Dataset '{dataset_type}' not supported!")
 
         if valid_size is not None:
             if isinstance(valid_size, float):
                 valid_size = int(valid_size * len(train_dataset))
             else:
                 assert isinstance(valid_size, int), 'invalid valid_size: %s' % valid_size
-            train_indexes, valid_indexes = self.random_sample_valid_set(
-                [cls for _, cls in train_dataset.samples], valid_size, self.n_classes,
-            )
-            train_sampler = torch.utils.data.sampler.SubsetRandomSampler(train_indexes)
-            valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(valid_indexes)
+                
+            if dataset_type == 'imagenet':
+                train_indexes, valid_indexes = self.random_sample_valid_set(
+                    [cls for _, cls in train_dataset.samples], valid_size, self.n_classes,
+                )
+                train_sampler = torch.utils.data.sampler.SubsetRandomSampler(train_indexes)
+                valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(valid_indexes)
 
-            valid_dataset = datasets.ImageFolder(self.train_path, transforms.Compose([
-                transforms.Resize(self.resize_value),
-                transforms.CenterCrop(self.image_size),
-                transforms.ToTensor(),
-                self.normalize,
-            ]))
+                valid_dataset = datasets.ImageFolder(self.train_path, transforms.Compose([
+                    transforms.Resize(self.resize_value),
+                    transforms.CenterCrop(self.image_size),
+                    transforms.ToTensor(),
+                    self.normalize,
+                ]))
+                
+                self.train = torch.utils.data.DataLoader(
+                    train_dataset, batch_size=train_batch_size, sampler=train_sampler,
+                    num_workers=n_worker, pin_memory=True,
+                )
+                self.valid = torch.utils.data.DataLoader(
+                    valid_dataset, batch_size=test_batch_size, sampler=valid_sampler,
+                    num_workers=n_worker, pin_memory=True,
+                )
+            elif dataset_type == 'cifar10':
+                valid_dataset = datasets.CIFAR10(root=self.train_path, train=False, transform=transforms.Compose([
+                    transforms.ToTensor()
+                ]), download=True)
+                
+                self.train = torch.utils.data.DataLoader(
+                    train_dataset, batch_size=train_batch_size, shuffle=True,
+                    num_workers=n_worker, pin_memory=True,
+                )
+                self.valid = torch.utils.data.DataLoader(
+                    valid_dataset, batch_size=test_batch_size,
+                    num_workers=n_worker, pin_memory=True,
+                )
+            elif dataset_type == 'cifar100':
+                valid_dataset = datasets.CIFAR100(root=self.train_path, train=False, transform=transforms.Compose([
+                    transforms.ToTensor()
+                ]), download=True)
 
-            self.train = torch.utils.data.DataLoader(
-                train_dataset, batch_size=train_batch_size, sampler=train_sampler,
-                num_workers=n_worker, pin_memory=True,
-            )
-            self.valid = torch.utils.data.DataLoader(
-                valid_dataset, batch_size=test_batch_size, sampler=valid_sampler,
-                num_workers=n_worker, pin_memory=True,
-            )
+                self.train = torch.utils.data.DataLoader(
+                    train_dataset, batch_size=train_batch_size, shuffle=True,
+                    num_workers=n_worker, pin_memory=True,
+                )
+                self.valid = torch.utils.data.DataLoader(
+                    valid_dataset, batch_size=test_batch_size,
+                    num_workers=n_worker, pin_memory=True,
+                )
         else:
             self.train = torch.utils.data.DataLoader(
                 train_dataset, batch_size=train_batch_size, shuffle=True,
-                num_workers=n_worker, pin_memory=True,
+                num_workers=n_worker, pin_memory=True
             )
             self.valid = None
 
-        self.test = torch.utils.data.DataLoader(
-            datasets.ImageFolder(self.valid_path, transforms.Compose([
-                transforms.Resize(self.resize_value),
-                transforms.CenterCrop(self.image_size),
-                transforms.ToTensor(),
-                self.normalize,
-            ])), batch_size=test_batch_size, shuffle=False, num_workers=n_worker, pin_memory=True,
-        )
+        if dataset_type == 'imagenet':
+            self.test = torch.utils.data.DataLoader(
+                datasets.ImageFolder(self.valid_path, transforms.Compose([
+                    transforms.Resize(self.resize_value),
+                    transforms.CenterCrop(self.image_size),
+                    transforms.ToTensor(),
+                    self.normalize,
+                ])), batch_size=test_batch_size, shuffle=False, num_workers=n_worker, pin_memory=True,
+            )
+        elif dataset_type == 'cifar10':
+            self.test = torch.utils.data.DataLoader(
+                datasets.CIFAR10(root=self.train_path, train=False, transform=transforms.Compose([
+                    transforms.ToTensor()
+                ]), download=True), batch_size=test_batch_size, shuffle=False, num_workers=n_worker, pin_memory=True,
+            )
+        elif dataset_type == 'cifar100':
+            self.test = torch.utils.data.DataLoader(
+                datasets.CIFAR100(root=self.train_path, train=False, transform=transforms.Compose([
+                    transforms.ToTensor()
+                ]), download=True), batch_size=test_batch_size, shuffle=False, num_workers=n_worker, pin_memory=True,
+            )
 
         if self.valid is None:
             self.valid = self.test
 
-    @staticmethod
-    def name():
-        return 'imagenet'
+    @property
+    def name(self):
+        return self._dataset_type
 
     @property
     def data_shape(self):
@@ -130,12 +181,23 @@ class ImagenetDataProvider(DataProvider):
 
     @property
     def n_classes(self):
-        return 1000
+        if self._dataset_type == 'imagenet':
+            return 1000
+        elif self._dataset_type == 'cifar10':
+            return 10
+        elif self._dataset_type == 'cifar100':
+            return 100
 
     @property
     def save_path(self):
-        if self._save_path is None:
-            self._save_path = '/dataset/imagenet'
+        if self._dataset_type == 'imagenet':
+            if self._save_path is None:
+                self._save_path = '/dataset/imagenet'
+                print(f"Forcing save_path to {self._save_path}")
+        else:
+            if self._save_path is None:
+                self._save_path = os.path.join(os.getcwd(), 'dataset')
+                print(f"Forcing save_path to {self._save_path}")
         return self._save_path
 
     @property
@@ -154,7 +216,7 @@ class ImagenetDataProvider(DataProvider):
     def normalize(self):
         return transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-    def build_train_transform(self, distort_color, resize_scale):
+    def build_train_transform(self, distort_color, resize_scale, cifar10_mode=False):
         print('Color jitter: %s' % distort_color)
         if distort_color == 'strong':
             color_transform = transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1)
@@ -163,20 +225,39 @@ class ImagenetDataProvider(DataProvider):
         else:
             color_transform = None
         if color_transform is None:
-            train_transforms = transforms.Compose([
-                transforms.RandomResizedCrop(self.image_size, scale=(resize_scale, 1.0)),
+            transforms_list = [
+                transforms.RandomRotation(45),
+                transforms.RandomGrayscale(0.2),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
-                self.normalize,
-            ])
+            ]
+            print("Additional Transforms added")
+            if not cifar10_mode:
+                transforms_list = [
+                    transforms.RandomResizedCrop(self.image_size, scale=(resize_scale, 1.0)),
+                    *transforms_list,
+                    self.normalize
+                ]
+            
+            train_transforms = transforms.Compose(transforms_list)
         else:
-            train_transforms = transforms.Compose([
-                transforms.RandomResizedCrop(self.image_size, scale=(resize_scale, 1.0)),
+            transforms_list = [
+                transforms.RandomRotation(45),
+                transforms.RandomGrayscale(0.2),
                 transforms.RandomHorizontalFlip(),
                 color_transform,
-                transforms.ToTensor(),
-                self.normalize,
-            ])
+                transforms.ToTensor()
+            ]
+            print("Additional Transforms added")
+            
+            if not cifar10_mode:
+                transforms_list = [
+                    transforms.RandomResizedCrop(self.image_size, scale=(resize_scale, 1.0)),
+                    *transforms_list,
+                    self.normalize
+                ]
+            
+            train_transforms = transforms.Compose(transforms_list)
         return train_transforms
 
     @property
@@ -185,4 +266,7 @@ class ImagenetDataProvider(DataProvider):
 
     @property
     def image_size(self):
-        return 224
+        if self._dataset_type == 'imagenet':
+            return 224
+        else:
+            return 32
