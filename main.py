@@ -45,7 +45,7 @@ if __name__ == "__main__":
     # configurations for search
     parser.add_argument("--checkpoint_path", default='./search_mobile_net.pt', type=str)
     parser.add_argument("--arch_path", default='./arch_path.pt', type=str)
-    parser.add_argument("--no-warmup", dest='warmup', action='store_false')
+    parser.add_argument("--warmup", dest='warmup', type=int, default=0)
     # configurations for retrain
     parser.add_argument("--exported_arch_path", default=None, type=str)
 
@@ -199,7 +199,8 @@ if __name__ == "__main__":
                                    grad_reg_loss_type=args.grad_reg_loss_type, 
                                    grad_reg_loss_params=grad_reg_loss_params, 
                                    applied_hardware=args.applied_hardware, dummy_input=dummy_input_size,
-                                   ref_latency=args.reference_latency)
+                                   ref_latency=args.reference_latency,
+                                   warmup_epochs=args.warmup)
         trainer.fit()
         print('Final architecture:', trainer.export())
         json.dump(trainer.export(), open('checkpoint.json', 'w'))
