@@ -6,12 +6,12 @@ import ops
 import putils
 from nni.retiarii.nn.pytorch import LayerChoice
 
-class SearchCifarNet(nn.Module):
+class SearchMobileNet(nn.Module):
     def __init__(self,
                  width_stages=[24,40,80,96,192,320],
                  n_cell_stages=[4,4,4,4,4,1],
                  stride_stages=[2,2,2,1,2,1],
-                 width_mult=1, n_classes=100,
+                 width_mult=1, n_classes=1000,
                  dropout_rate=0, bn_param=(0.1, 1e-3)):
         """
         Parameters
@@ -25,7 +25,7 @@ class SearchCifarNet(nn.Module):
         width_mult : int
             the scale factor of width
         """
-        super(SearchCifarNet, self).__init__()
+        super(SearchMobileNet, self).__init__()
 
         input_channel = putils.make_divisible(32 * width_mult, 8)
         first_cell_width = putils.make_divisible(16 * width_mult, 8)

@@ -9,7 +9,7 @@ from torchvision import transforms
 from nni.retiarii.fixed import fixed_arch
 
 import datasets
-from model import SearchCifarNet
+from model import SearchMobileNet
 from putils import LabelSmoothingLoss, accuracy, get_parameters
 from retrain import Retrain
 
@@ -32,10 +32,14 @@ if __name__ == "__main__":
     parser.add_argument("--applied_hardware", default=None, type=str, help='the hardware to predict model latency')
     parser.add_argument("--reference_latency", default=None, type=float, help='the reference latency in specified hardware')
     # configurations of imagenet dataset
+    parser.add_argument("--data_path", default='/data/imagenet/', type=str)
     parser.add_argument("--train_batch_size", default=256, type=int)
     parser.add_argument("--test_batch_size", default=500, type=int)
-    parser.add_argument("--num_classes", default=100, type=int)
-    parser.add_argument("--n_worker", default=16, type=int)
+    parser.add_argument("--n_worker", default=32, type=int)
+    parser.add_argument("--resize_scale", default=0.08, type=float)
+    parser.add_argument("--distort_color", default='normal', type=str, choices=['normal', 'strong', 'None'])
+    # configurations for training mode
+    parser.add_argument("--train_mode", default='search', type=str, choices=['search', 'retrain'])
     # configurations for search
     parser.add_argument("--checkpoint_path", default='./search_mobile_net.pt', type=str)
     parser.add_argument("--arch_path", default='./arch_path.pt', type=str)
@@ -44,15 +48,27 @@ if __name__ == "__main__":
     parser.add_argument("--exported_arch_path", default=None, type=str)
 
     args = parser.parse_args()
+    if args.train_mode == 'retrain' and args.exported_arch_path is None:
+        logger.error('When --train_mode is retrain, --exported_arch_path must be specified.')
+        sys.exit(-1)
 
-    model = SearchCifarNet(width_stages=[int(i) for i in args.width_stages.split(',')],
-                            n_cell_stages=[int(i) for i in args.n_cell_stages.split(',')],
-                            stride_stages=[int(i) for i in args.stride_stages.split(',')],
-                            n_classes=args.num_classes,
-                            dropout_rate=args.dropout_rate,
-                            bn_param=(args.bn_momentum, args.bn_eps),
-                            width_mult=0.25
-                            )
+    if args.train_mode == 'retrain':
+        assert os.path.isfile(args.exported_arch_path), \
+            "exported_arch_path {} should be a file.".format(args.exported_arch_path)
+        with fixed_arch(args.exported_arch_path):
+            model = SearchMobileNet(width_stages=[int(i) for i in args.width_stages.split(',')],
+                                    n_cell_stages=[int(i) for i in args.n_cell_stages.split(',')],
+                                    stride_stages=[int(i) for i in args.stride_stages.split(',')],
+                                    n_classes=1000,
+                                    dropout_rate=args.dropout_rate,
+                                    bn_param=(args.bn_momentum, args.bn_eps))
+    else:
+        model = SearchMobileNet(width_stages=[int(i) for i in args.width_stages.split(',')],
+                                n_cell_stages=[int(i) for i in args.n_cell_stages.split(',')],
+                                stride_stages=[int(i) for i in args.stride_stages.split(',')],
+                                n_classes=1000,
+                                dropout_rate=args.dropout_rate,
+                                bn_param=(args.bn_momentum, args.bn_eps))
     logger.info('SearchMobileNet model create done')
     model.init_model()
     logger.info('SearchMobileNet model init done')
@@ -62,6 +78,16 @@ if __name__ == "__main__":
         device = torch.device('cuda')
     else:
         device = torch.device('cpu')
+
+    logger.info('Creating data provider...')
+    data_provider = datasets.ImagenetDataProvider(save_path=args.data_path,
+                                                  train_batch_size=args.train_batch_size,
+                                                  test_batch_size=args.test_batch_size,
+                                                  valid_size=None,
+                                                  n_worker=args.n_worker,
+                                                  resize_scale=args.resize_scale,
+                                                  distort_color=args.distort_color)
+    logger.info('Creating data provider done')
 
     if args.no_decay_keys:
         keys = args.no_decay_keys
@@ -84,25 +110,32 @@ if __name__ == "__main__":
     else:
         args.grad_reg_loss_params = None
 
-    from nni.retiarii.oneshot.pytorch import ProxylessTrainer
-    from torchvision.datasets import CIFAR100
-    dataset = CIFAR100(root='./cifar100', train=True, download=True, transform=transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()
-    ]))
-    trainer = ProxylessTrainer(model,
-                                # loss=LabelSmoothingLoss(),
-                                loss=torch.nn.CrossEntropyLoss(),
-                                dataset=dataset,
-                                optimizer=optimizer,
-                                metrics=lambda output, target: accuracy(output, target, topk=(1, 5,)),
-                                warmup_epochs=5,
-                                num_epochs=120,
-                                log_frequency=10,
-                                grad_reg_loss_type=args.grad_reg_loss_type, 
-                                grad_reg_loss_params=grad_reg_loss_params, 
-                                applied_hardware=args.applied_hardware, dummy_input=(1, 3, 32, 32),
-                                ref_latency=args.reference_latency)
-    trainer.fit()
-    print('Final architecture:', trainer.export())
-    json.dump(trainer.export(), open('checkpoint.json', 'w'))
+    if args.train_mode == 'search':
+        from nni.retiarii.oneshot.pytorch import ProxylessTrainer
+        from torchvision.datasets import ImageNet
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+        dataset = ImageNet(args.data_path, transform=transforms.Compose([
+            transforms.RandomResizedCrop(224),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ]))
+        trainer = ProxylessTrainer(model,
+                                   loss=LabelSmoothingLoss(),
+                                   dataset=dataset,
+                                   optimizer=optimizer,
+                                   metrics=lambda output, target: accuracy(output, target, topk=(1, 5,)),
+                                   num_epochs=120,
+                                   log_frequency=10,
+                                   grad_reg_loss_type=args.grad_reg_loss_type, 
+                                   grad_reg_loss_params=grad_reg_loss_params, 
+                                   applied_hardware=args.applied_hardware, dummy_input=(1, 3, 224, 224),
+                                   ref_latency=args.reference_latency)
+        trainer.fit()
+        print('Final architecture:', trainer.export())
+        json.dump(trainer.export(), open('checkpoint.json', 'w'))
+    elif args.train_mode == 'retrain':
+        # this is retrain
+        trainer = Retrain(model, optimizer, device, data_provider, n_epochs=300)
+        trainer.run()
